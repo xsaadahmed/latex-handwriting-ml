@@ -29,10 +29,10 @@ class LatexRenderer:
     dpi: int = 200
     font_size: int = 20
 
-    def __post_init__(self) -> None:
+def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # FIX: Changed "Bitmap" to "agg" to support Linux/Colab environments
-        self._parser = mathtext.MathTextParser("agg")
+        # Change "agg" to "Agg" (capitalized)
+        self._parser = mathtext.MathTextParser("Agg")
         self._counter: int = 0
 
     def render_latex_to_image(
