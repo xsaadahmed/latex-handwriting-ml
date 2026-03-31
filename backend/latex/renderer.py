@@ -40,40 +40,47 @@ class LatexRenderer:
         latex_string: str,
         output_size: Tuple[int, int] | None = None,
     ) -> np.ndarray:
-        """Render a LaTeX string to a normalized grayscale image and save it as PNG."""
         if not latex_string or not latex_string.strip():
             raise LatexRenderingError("Empty LaTeX string cannot be rendered.")
 
         target_h, target_w = output_size or self.image_size
 
         try:
-            expr = latex_string.strip()
-            # MathTextParser expects math-delimited expressions ($...$).
-            # Avoid adding delimiters twice if the caller already provided them.
-            if expr.startswith("$") and expr.endswith("$"):
-                math_expr = expr
-            else:
-                math_expr = f"${expr}$"
-            rgba, _ = self._parser.to_rgba(
-                math_expr,
-                dpi=self.dpi,
-                fontsize=self.font_size,
+            # Wrap in $$ if not present
+            math_expr = f"${latex_string}$" if not latex_string.startswith("$") else latex_string
+
+            # MODERN WAY: parse then render
+            width, height, depth, glyphs, rects = self._parser.parse(
+                math_expr, dpi=self.dpi, prop=matplotlib.font_manager.FontProperties(size=self.font_size)
             )
+
+            # Create a figure to draw the parsed math
+            fig = matplotlib.figure.Figure(figsize=(width / self.dpi, height / self.dpi), dpi=self.dpi)
+            fig.patch.set_alpha(0)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_axis_off()
+
+            # Draw the math text
+            ax.text(
+                0,
+                depth / height,
+                math_expr,
+                fontproperties=matplotlib.font_manager.FontProperties(size=self.font_size),
+            )
+
+            # Convert figure to RGBA array
+            canvas = matplotlib.backends.backend_agg.FigureCanvasAgg(fig)
+            canvas.draw()
+            rgba = np.asarray(canvas.buffer_rgba())
         except Exception as exc:
             raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}") from exc
 
-        rgba = np.asarray(rgba, dtype=np.float32)
-        if rgba.ndim != 3 or rgba.shape[-1] != 4:
-            raise LatexRenderingError("Unexpected renderer output shape.")
-
-        # Normalize to [0,1] if required.
-        if rgba.max() > 1.1:
-            rgba = rgba / 255.0
-
+        # --- Remaining logic (Compositing, Grayscale, Resize) remains the same ---
+        rgba = rgba.astype(np.float32) / 255.0
         rgb = rgba[..., :3]
         alpha = rgba[..., 3:4]
-        white = np.ones_like(rgb, dtype=np.float32)
-        composited = rgb * alpha + white * (1.0 - alpha)  # white background
+        white = np.ones_like(rgb)
+        composited = rgb * alpha + white * (1.0 - alpha)
 
         grayscale = np.dot(composited[..., :3], [0.299, 0.587, 0.114])
         grayscale = np.clip(grayscale, 0.0, 1.0)
