@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import torch
 from torch import nn, optim
@@ -85,7 +85,7 @@ def train(config_path: str | Path = "config.yaml") -> None:
     log_interval = int(train_cfg.get("log_interval", 10))
     sample_interval = int(train_cfg.get("sample_interval", 1))
 
-    image_size = int(data_cfg.get("image_size", image_cfg.get("height", 256)))
+    _image_size = int(data_cfg.get("image_size", image_cfg.get("height", 256)))
     train_split = float(data_cfg.get("train_split", 0.8))
     num_workers = int(data_cfg.get("num_workers", 4))
 
@@ -130,13 +130,13 @@ def train(config_path: str | Path = "config.yaml") -> None:
         "val_L1": [],
     }
 
-    global_step = 0
-
     for epoch in range(1, epochs + 1):
         gen.train()
         disc.train()
 
         epoch_g_total = 0.0
+        epoch_g_adv = 0.0
+        epoch_g_l1 = 0.0
         epoch_d_total = 0.0
         num_batches = 0
 
@@ -179,9 +179,10 @@ def train(config_path: str | Path = "config.yaml") -> None:
             opt_g.step()
 
             epoch_g_total += float(loss_g_total.item())
+            epoch_g_adv += float(loss_g_adv.item())
+            epoch_g_l1 += float(loss_g_l1.item())
             epoch_d_total += float(loss_d.item())
             num_batches += 1
-            global_step += 1
 
             if batch_idx % log_interval == 0:
                 print(
@@ -204,8 +205,12 @@ def train(config_path: str | Path = "config.yaml") -> None:
 
         # End of epoch
         avg_g_total = epoch_g_total / max(1, num_batches)
+        avg_g_adv = epoch_g_adv / max(1, num_batches)
+        avg_g_l1 = epoch_g_l1 / max(1, num_batches)
         avg_d_total = epoch_d_total / max(1, num_batches)
         history["G_total"].append(avg_g_total)
+        history["G_adv"].append(avg_g_adv)
+        history["G_L1"].append(avg_g_l1)
         history["D_total"].append(avg_d_total)
 
         # Validation
@@ -221,7 +226,8 @@ def train(config_path: str | Path = "config.yaml") -> None:
 
         print(
             f"Epoch {epoch}/{epochs} completed. "
-            f"avg_G_loss={avg_g_total:.4f}, avg_D_loss={avg_d_total:.4f}, val_L1={val_l1:.4f}"
+            f"avg_G_loss={avg_g_total:.4f}, avg_G_adv={avg_g_adv:.4f}, "
+            f"avg_G_L1={avg_g_l1:.4f}, avg_D_loss={avg_d_total:.4f}, val_L1={val_l1:.4f}"
         )
 
         # Checkpointing
@@ -247,13 +253,4 @@ def train(config_path: str | Path = "config.yaml") -> None:
 
 
 if __name__ == "__main__":
-    train()
-
-if __name__ == "__main__":
-    # Create synthetic dataset if needed
-    if not os.path.exists("data/printed") or len(os.listdir("data/printed")) < 100:
-        print("Creating synthetic dataset...")
-        create_synthetic_dataset(num_samples=1000)
-    
-    # Start training
     train()

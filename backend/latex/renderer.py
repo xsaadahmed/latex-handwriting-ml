@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
-# Force Matplotlib to use the 'Agg' backend for headless environments (like Colab)
-matplotlib.use('Agg')
+# Force Matplotlib to use a headless backend.
+matplotlib.use("Agg")
 from matplotlib import mathtext
 from PIL import Image
 
+
 class LatexRenderingError(Exception):
     """Raised when LaTeX cannot be parsed or rendered."""
+
 
 @dataclass
 class LatexRenderer:
@@ -29,9 +30,8 @@ class LatexRenderer:
     dpi: int = 200
     font_size: int = 20
 
-def __post_init__(self) -> None:
+    def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # Change "agg" to "Agg" (capitalized)
         self._parser = mathtext.MathTextParser("Agg")
         self._counter: int = 0
 
@@ -40,13 +40,13 @@ def __post_init__(self) -> None:
         latex_string: str,
         output_size: Tuple[int, int] | None = None,
     ) -> np.ndarray:
+        """Render a LaTeX string to a normalized grayscale image and save it as PNG."""
         if not latex_string or not latex_string.strip():
             raise LatexRenderingError("Empty LaTeX string cannot be rendered.")
 
         target_h, target_w = output_size or self.image_size
 
         try:
-            # Wrap in $$ to ensure math mode is active
             math_expr = f"${latex_string}$"
             rgba, _ = self._parser.to_rgba(
                 math_expr,
@@ -56,26 +56,24 @@ def __post_init__(self) -> None:
         except Exception as exc:
             raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}") from exc
 
-        # Composite onto a white background
         rgba = np.asarray(rgba, dtype=np.float32)
-        rgb = rgba[..., :3]
-        # Agg returns values 0-1 or 0-255 depending on version; normalize to 0-1
+        if rgba.ndim != 3 or rgba.shape[-1] != 4:
+            raise LatexRenderingError("Unexpected renderer output shape.")
+
+        # Normalize to [0,1] if required.
         if rgba.max() > 1.1:
             rgba = rgba / 255.0
-            rgb = rgb / 255.0
-            
-        alpha = rgba[..., 3:4]
-        white = np.ones_like(rgb)
-        composited = rgb * alpha + white * (1.0 - alpha)
 
-        # Convert to grayscale [0,1]
+        rgb = rgba[..., :3]
+        alpha = rgba[..., 3:4]
+        white = np.ones_like(rgb, dtype=np.float32)
+        composited = rgb * alpha + white * (1.0 - alpha)  # white background
+
         grayscale = np.dot(composited[..., :3], [0.299, 0.587, 0.114])
         grayscale = np.clip(grayscale, 0.0, 1.0)
 
-        # Resize and pad
         resized = self._resize_and_pad(grayscale, target_h, target_w)
 
-        # Save PNG file
         file_path = self._next_output_path()
         image_to_save = Image.fromarray((resized * 255.0).astype(np.uint8), mode="L")
         image_to_save.save(file_path)
@@ -83,9 +81,13 @@ def __post_init__(self) -> None:
         return resized
 
     def _resize_and_pad(self, img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+        """Resize while preserving aspect ratio and pad to the target canvas."""
         h, w = img.shape[:2]
+        if h == 0 or w == 0:
+            raise LatexRenderingError("Rendered image has invalid shape.")
+
         scale = min(target_h / h, target_w / w)
-        new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
+        new_h, new_w = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
 
         pil_img = Image.fromarray((img * 255.0).astype(np.uint8), mode="L")
         pil_resized = pil_img.resize((new_w, new_h), resample=Image.BICUBIC)
@@ -97,11 +99,31 @@ def __post_init__(self) -> None:
         return canvas
 
     def _next_output_path(self) -> Path:
+        """Return the next auto-incremented output path."""
         self._counter += 1
         return self.output_dir / f"latex_{self._counter:04d}.png"
 
     def preprocess_image(self, image_array: np.ndarray) -> torch.Tensor:
+        """Convert grayscale image array to normalized tensor with shape (1, H, W)."""
         arr = image_array.astype(np.float32)
-        if arr.max() > 1.0: arr /= 255.0
+        if arr.max() > 1.0:
+            arr /= 255.0
+        arr = np.clip(arr, 0.0, 1.0)
+
         tensor = torch.from_numpy(arr).unsqueeze(0).float()
         return (tensor - 0.5) / 0.5
+
+
+def batch_render_latex_to_images(
+    latex_strings: Sequence[str],
+    renderer: Optional[LatexRenderer] = None,
+) -> List[np.ndarray]:
+    """Render multiple LaTeX expressions; skip invalid ones with logged errors."""
+    renderer = renderer or LatexRenderer()
+    outputs: List[np.ndarray] = []
+    for idx, expr in enumerate(latex_strings):
+        try:
+            outputs.append(renderer.render_latex_to_image(expr))
+        except LatexRenderingError as exc:
+            print(f"[batch_render] Skipping index {idx}: {exc}")
+    return outputs
