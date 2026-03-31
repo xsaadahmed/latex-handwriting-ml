@@ -47,7 +47,13 @@ class LatexRenderer:
         target_h, target_w = output_size or self.image_size
 
         try:
-            math_expr = f"${latex_string}$"
+            expr = latex_string.strip()
+            # MathTextParser expects math-delimited expressions ($...$).
+            # Avoid adding delimiters twice if the caller already provided them.
+            if expr.startswith("$") and expr.endswith("$"):
+                math_expr = expr
+            else:
+                math_expr = f"${expr}$"
             rgba, _ = self._parser.to_rgba(
                 math_expr,
                 dpi=self.dpi,
