@@ -49,10 +49,15 @@ class LatexRenderer:
             # Wrap in $$ if not present
             math_expr = f"${latex_string}$" if not latex_string.startswith("$") else latex_string
 
-            # MODERN WAY: parse then render
-            width, height, depth, glyphs, rects = self._parser.parse(
-                math_expr, dpi=self.dpi, prop=matplotlib.font_manager.FontProperties(size=self.font_size)
+            # Use *args to catch any extra values Matplotlib might return
+            parsed_results = self._parser.parse(
+                math_expr,
+                dpi=self.dpi,
+                prop=matplotlib.font_manager.FontProperties(size=self.font_size),
             )
+
+            # Extract the first three (width, height, depth)
+            width, height, depth = parsed_results[:3]
 
             # Create a figure to draw the parsed math
             fig = matplotlib.figure.Figure(figsize=(width / self.dpi, height / self.dpi), dpi=self.dpi)
@@ -72,8 +77,9 @@ class LatexRenderer:
             canvas = matplotlib.backends.backend_agg.FigureCanvasAgg(fig)
             canvas.draw()
             rgba = np.asarray(canvas.buffer_rgba())
-        except Exception as exc:
-            raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}") from exc
+
+        except Exception:
+            raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}")
 
         # --- Remaining logic (Compositing, Grayscale, Resize) remains the same ---
         rgba = rgba.astype(np.float32) / 255.0
