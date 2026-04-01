@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -7,10 +8,11 @@ from typing import List, Optional, Sequence, Tuple
 import matplotlib
 import numpy as np
 import torch
-# Force Matplotlib to use a headless backend.
+# Force Matplotlib to use a headless backend for server/notebook environments
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from matplotlib import mathtext
-from PIL import Image
+from PIL import Image, ImageChops
 
 
 class LatexRenderingError(Exception):
@@ -20,11 +22,11 @@ class LatexRenderingError(Exception):
 @dataclass
 class LatexRenderer:
     """
-    Render LaTeX strings to normalized grayscale images suitable for ML pipelines.
+    Renders LaTeX strings to normalized grayscale images.
+    Uses a robust crop-and-pad approach to ensure consistent output for ML models.
     """
-
     output_dir: Path = field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "outputs" / "latex_renders"
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "printed"
     )
     image_size: Tuple[int, int] = (256, 256)
     dpi: int = 200
@@ -32,119 +34,97 @@ class LatexRenderer:
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._parser = mathtext.MathTextParser("Agg")
         self._counter: int = 0
 
-    def render_latex_to_image(
-        self,
-        latex_string: str,
-        output_size: Tuple[int, int] | None = None,
-    ) -> np.ndarray:
+    def render_latex_to_image(self, latex_string: str, output_size: Tuple[int, int] | None = None) -> np.ndarray:
+        """
+        Renders a LaTeX string, crops to content, and pads to a fixed square size.
+        """
         if not latex_string or not latex_string.strip():
-            raise LatexRenderingError("Empty LaTeX string cannot be rendered.")
+            raise LatexRenderingError("Empty LaTeX string provided.")
 
         target_h, target_w = output_size or self.image_size
 
         try:
-            math_expr = f"${latex_string}$" if not latex_string.startswith("$") else latex_string
+            # 1. Render to a large canvas to ensure we capture the whole expression
+            fig = plt.figure(figsize=(6, 2), dpi=self.dpi)
+            fig.text(0.5, 0.5, f"${latex_string}$", size=self.font_size, va="center", ha="center")
 
-            parsed_results = self._parser.parse(
-                math_expr,
-                dpi=self.dpi,
-                prop=matplotlib.font_manager.FontProperties(size=self.font_size),
-            )
+            # 2. Extract buffer
+            fig.canvas.draw()
+            rgba = np.array(fig.canvas.renderer.buffer_rgba())
+            plt.close(fig)  # Explicitly close to free memory
 
-            width, height, depth = parsed_results[:3]
+            # 3. Convert to Grayscale and perform a tight crop
+            pil_img = Image.fromarray(rgba).convert("L")
+            inverted_img = ImageChops.invert(pil_img)
+            bbox = inverted_img.getbbox()
 
-            # SAFETY CHECK: If height is 0, provide a tiny epsilon to avoid ZeroDivisionError
-            safe_height = max(height, 1e-6)
-            y_pos = depth / safe_height
+            if not bbox:
+                raise LatexRenderingError(f"Render resulted in an empty image for: {latex_string}")
 
-            fig = matplotlib.figure.Figure(
-                figsize=(max(width, 1) / self.dpi, safe_height / self.dpi),
-                dpi=self.dpi,
-            )
-            fig.patch.set_alpha(0)
-            ax = fig.add_axes([0, 0, 1, 1])
-            ax.set_axis_off()
+            cropped = pil_img.crop(bbox)
+            
+            # 4. Resize and pad while preserving aspect ratio
+            normalized_arr = np.array(cropped) / 255.0
+            resized = self._resize_and_pad(normalized_arr, target_h, target_w)
 
-            # Use the safe position
-            ax.text(
-                0,
-                y_pos,
-                math_expr,
-                fontproperties=matplotlib.font_manager.FontProperties(size=self.font_size),
-            )
+            # 5. Persistent storage
+            file_path = self.output_dir / f"latex_{self._counter:05d}.png"
+            self._counter += 1
+            Image.fromarray((resized * 255.0).astype(np.uint8)).save(file_path)
 
-            canvas = matplotlib.backends.backend_agg.FigureCanvasAgg(fig)
-            canvas.draw()
-            rgba = np.asarray(canvas.buffer_rgba())
+            return resized
 
         except Exception as exc:
-            raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}") from exc
+            if isinstance(exc, LatexRenderingError):
+                raise
+            raise LatexRenderingError(f"Failed to render: {latex_string}") from exc
 
-        # --- Remaining logic (Compositing, Grayscale, Resize) remains the same ---
-        rgba = rgba.astype(np.float32) / 255.0
-        rgb = rgba[..., :3]
-        alpha = rgba[..., 3:4]
-        white = np.ones_like(rgb)
-        composited = rgb * alpha + white * (1.0 - alpha)
-
-        grayscale = np.dot(composited[..., :3], [0.299, 0.587, 0.114])
-        grayscale = np.clip(grayscale, 0.0, 1.0)
-
-        resized = self._resize_and_pad(grayscale, target_h, target_w)
-
-        file_path = self._next_output_path()
-        image_to_save = Image.fromarray((resized * 255.0).astype(np.uint8), mode="L")
-        image_to_save.save(file_path)
-
-        return resized
+    def preprocess_for_model(self, image_array: np.ndarray) -> torch.Tensor:
+        """
+        Converts a [0, 1] numpy array to a [-1, 1] PyTorch tensor of shape (1, H, W).
+        """
+        tensor = torch.from_numpy(image_array).float()
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)  # Add channel dimension: (1, H, W)
+        
+        # Normalize from [0, 1] to [-1, 1]
+        return (tensor - 0.5) / 0.5
 
     def _resize_and_pad(self, img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-        """Resize while preserving aspect ratio and pad to the target canvas."""
-        h, w = img.shape[:2]
-        if h == 0 or w == 0:
-            raise LatexRenderingError("Rendered image has invalid shape.")
+        """Resizes preserving aspect ratio and pads with white (1.0)."""
+        if img.ndim == 3:
+            img = img.mean(axis=2)
 
-        scale = min(target_h / h, target_w / w)
-        new_h, new_w = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+        h, w = img.shape
+        # Use a 0.85 multiplier to ensure a clean margin around the expression
+        scale = min(target_h / h, target_w / w) * 0.85
+        new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
 
         pil_img = Image.fromarray((img * 255.0).astype(np.uint8), mode="L")
         pil_resized = pil_img.resize((new_w, new_h), resample=Image.BICUBIC)
-        resized = np.asarray(pil_resized, dtype=np.float32) / 255.0
+        resized_arr = np.asarray(pil_resized) / 255.0
 
+        # Create white background canvas
         canvas = np.ones((target_h, target_w), dtype=np.float32)
-        top, left = (target_h - new_h) // 2, (target_w - new_w) // 2
-        canvas[top : top + new_h, left : left + new_w] = resized
+        y_off = (target_h - new_h) // 2
+        x_off = (target_w - new_w) // 2
+        canvas[y_off : y_off + new_h, x_off : x_off + new_w] = resized_arr
         return canvas
-
-    def _next_output_path(self) -> Path:
-        """Return the next auto-incremented output path."""
-        self._counter += 1
-        return self.output_dir / f"latex_{self._counter:04d}.png"
-
-    def preprocess_image(self, image_array: np.ndarray) -> torch.Tensor:
-        """Convert grayscale image array to normalized tensor with shape (1, H, W)."""
-        arr = image_array.astype(np.float32)
-        if arr.max() > 1.0:
-            arr /= 255.0
-        arr = np.clip(arr, 0.0, 1.0)
-
-        tensor = torch.from_numpy(arr).unsqueeze(0).float()
-        return (tensor - 0.5) / 0.5
 
 
 def batch_render_latex_to_images(
     latex_strings: Sequence[str],
     renderer: Optional[LatexRenderer] = None,
 ) -> List[np.ndarray]:
-    """Render multiple LaTeX expressions; skip invalid ones with logged errors."""
+    """Efficiently renders a sequence of LaTeX strings."""
     renderer = renderer or LatexRenderer()
     outputs: List[np.ndarray] = []
     for idx, expr in enumerate(latex_strings):
         try:
-            outputs.append(renderer.render_latex_to_image(expr))
+            img = renderer.render_latex_to_image(expr)
+            outputs.append(img)
         except LatexRenderingError as exc:
             print(f"[batch_render] Skipping index {idx}: {exc}")
     return outputs
