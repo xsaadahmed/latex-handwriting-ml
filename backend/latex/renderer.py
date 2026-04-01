@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -11,7 +10,6 @@ import torch
 # Force Matplotlib to use a headless backend for server/notebook environments
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib import mathtext
 from PIL import Image, ImageChops
 
 
@@ -68,11 +66,6 @@ class LatexRenderer:
             # 4. Resize and pad while preserving aspect ratio
             normalized_arr = np.array(cropped) / 255.0
             resized = self._resize_and_pad(normalized_arr, target_h, target_w)
-
-            # 5. Persistent storage
-            file_path = self.output_dir / f"latex_{self._counter:05d}.png"
-            self._counter += 1
-            Image.fromarray((resized * 255.0).astype(np.uint8)).save(file_path)
 
             return resized
 

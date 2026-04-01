@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Sequence
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageChops
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
@@ -80,9 +80,9 @@ def _random_equation() -> str:
         lambda: rf"E = mc^{{{random.randint(2,3)}}}",
         lambda: rf"\int_{{{random.randint(0,1)}}}^{{{random.randint(2,5)}}} x^{{{random.randint(2,4)}}} \, dx",
         lambda: rf"\sum_{{i={random.randint(0,1)}}}^{{n}} i^{{{random.randint(1,2)}}}",
-        lambda: rf"a^2 + b^2 = c^2",
+        lambda: r"a^2 + b^2 = c^2",
         lambda: rf"\sqrt{{{random.randint(10,99)}}}",
-        lambda: rf"\lim_{{x \to \infty}} \frac{{1}}{{x}} = 0",
+        lambda: r"\lim_{x \to \infty} \frac{1}{x} = 0",
         lambda: rf"f(x) = {random.randint(1,9)}x^2 + {random.randint(1,9)}x + {random.randint(1,9)}"
     ]
     return random.choice(templates)()
@@ -145,53 +145,64 @@ def _add_noise_and_texture(image: np.ndarray) -> np.ndarray:
 
 
 def create_synthetic_dataset(num_samples: int = 1000) -> Tuple[Path, Path]:
-    """
-    Create a synthetic paired dataset.
-    """
     project_root = Path(__file__).resolve().parents[2]
     data_root = project_root / "data"
     printed_dir = data_root / "printed"
     handwritten_dir = data_root / "handwritten"
-    
+
+    # Clean old failed attempts to avoid name mismatches
+    import shutil
+    if printed_dir.exists():
+        shutil.rmtree(printed_dir)
+    if handwritten_dir.exists():
+        shutil.rmtree(handwritten_dir)
+
     printed_dir.mkdir(parents=True, exist_ok=True)
     handwritten_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize renderer without an internal output_dir to stop it from
+    # saving extra "latex_0000" files in /outputs/
     renderer = LatexRenderer()
 
     print(f"🎨 Generating {num_samples} synthetic pairs...")
 
     for idx in range(num_samples):
         eq = _random_equation()
-        base_name = f"eq_{idx:05d}.png"
+        # WE DEFINE THE NAME ONCE HERE
+        base_name = f"sample_{idx:05d}.png"
 
         try:
-            # renderer.render_latex_to_image returns [0, 1] float32 array
+            # Get the numpy array (the [0,1] float version)
             img_arr = renderer.render_latex_to_image(eq)
-            
-            # Printed version
+
+            # Printed version (Clean)
             printed_img = (img_arr * 255.0).astype(np.uint8)
-            
-            # Handwritten version: rotation -> deformation -> noise
+
+            # Handwritten version (Messy)
             angle = random.uniform(-3.0, 3.0)
             h, w = printed_img.shape
             rot_mat = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-            rotated = cv2.warpAffine(printed_img, rot_mat, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+            rotated = cv2.warpAffine(
+                printed_img,
+                rot_mat,
+                (w, h),
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=255,
+            )
 
             deformed = _elastic_deform(rotated)
             handwritten_img = _add_noise_and_texture(deformed)
 
-            # Save pairs
+            # SAVE BOTH WITH THE EXACT SAME FILENAME
             cv2.imwrite(str(printed_dir / base_name), printed_img)
             cv2.imwrite(str(handwritten_dir / base_name), handwritten_img)
 
             if idx % 100 == 0:
-                print(f"   Processed {idx}/{num_samples}...")
+                print(f"   Stored pair: {base_name}")
 
-        except Exception as e:
-            print(f"   Error rendering {eq}: {e}")
+        except Exception:
             continue
 
-    print("✅ Dataset generation complete.")
     return printed_dir, handwritten_dir
 
 
