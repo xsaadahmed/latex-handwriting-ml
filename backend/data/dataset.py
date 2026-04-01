@@ -2,24 +2,21 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
 
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageChops
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-from backend.latex import LatexRenderer
+from backend.latex.renderer import LatexRenderer
 
 
 class PairedEquationDataset(Dataset):
     """
     Dataset of paired printed and handwritten equation images.
-
-    Assumes that both directories contain images with matching filenames,
-    e.g. `eq_00001.png` exists in both `printed_dir` and `handwritten_dir`.
     """
 
     def __init__(
@@ -32,8 +29,9 @@ class PairedEquationDataset(Dataset):
         self.printed_dir = Path(printed_dir)
         self.handwritten_dir = Path(handwritten_dir)
 
-        self.printed_dir.mkdir(parents=True, exist_ok=True)
-        self.handwritten_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure directory existence is checked but not necessarily created here
+        if not self.printed_dir.exists() or not self.handwritten_dir.exists():
+             raise RuntimeError(f"Directories {self.printed_dir} or {self.handwritten_dir} do not exist.")
 
         printed_files = {p.name for p in self.printed_dir.glob("*.png")}
         handwritten_files = {p.name for p in self.handwritten_dir.glob("*.png")}
@@ -54,10 +52,10 @@ class PairedEquationDataset(Dataset):
         else:
             self.transform = transform
 
-    def __len__(self) -> int:  # type: ignore[override]
+    def __len__(self) -> int:
         return len(self.filenames)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:  # type: ignore[override]
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         fname = self.filenames[idx]
         printed_path = self.printed_dir / fname
         handwritten_path = self.handwritten_dir / fname
@@ -76,125 +74,124 @@ class PairedEquationDataset(Dataset):
 
 
 def _random_equation() -> str:
-    """Generate a simple random LaTeX equation string."""
-    ops = [r"+", r"-", r"\times", r"\div"]
-    idx = random.randint(0, 3)
-    if idx == 0:
-        a, b = random.randint(1, 9), random.randint(1, 9)
-        return rf"{a}x^{b} + {b}x + {a}"
-    if idx == 1:
-        n = random.randint(3, 10)
-        return rf"\sum_{{i=1}}^{{{n}}} i^2"
-    if idx == 2:
-        a, b = random.randint(1, 5), random.randint(1, 5)
-        return rf"\int_0^1 x^{a}\, dx = \frac1{{{a+1}}}"
-    op = random.choice(ops)
-    a, b = random.randint(1, 9), random.randint(1, 9)
-    return rf"{a} {op} {b} = ?"
+    """Generate diverse LaTeX equation strings for better model generalization."""
+    templates = [
+        lambda: rf"\frac{{{random.randint(1,20)}}}{{{random.randint(1,20)}}}",
+        lambda: rf"E = mc^{{{random.randint(2,3)}}}",
+        lambda: rf"\int_{{{random.randint(0,1)}}}^{{{random.randint(2,5)}}} x^{{{random.randint(2,4)}}} \, dx",
+        lambda: rf"\sum_{{i={random.randint(0,1)}}}^{{n}} i^{{{random.randint(1,2)}}}",
+        lambda: rf"a^2 + b^2 = c^2",
+        lambda: rf"\sqrt{{{random.randint(10,99)}}}",
+        lambda: rf"\lim_{{x \to \infty}} \frac{{1}}{{x}} = 0",
+        lambda: rf"f(x) = {random.randint(1,9)}x^2 + {random.randint(1,9)}x + {random.randint(1,9)}"
+    ]
+    return random.choice(templates)()
 
 
 def _elastic_deform(image: np.ndarray, alpha: float = 36.0, sigma: float = 6.0) -> np.ndarray:
-    """
-    Apply a simple elastic deformation using OpenCV.
-
-    This is a lightweight approximation suitable for handwriting-style warps.
-    """
+    """Apply elastic deformation to simulate natural handwriting jitters."""
+    # Ensure 2D for processing
     if image.ndim == 3:
-        h, w, c = image.shape
+        img = np.squeeze(image)
     else:
-        h, w = image.shape
-        c = 1
-        image = image[..., None]
+        img = image
 
-    dx = cv2.GaussianBlur((np.random.rand(h, w, 1) * 2 - 1), (0, 0), sigma) * alpha
-    dy = cv2.GaussianBlur((np.random.rand(h, w, 1) * 2 - 1), (0, 0), sigma) * alpha
+    h, w = img.shape[:2]
+    
+    dx = cv2.GaussianBlur((np.random.rand(h, w) * 2 - 1), (0, 0), sigma) * alpha
+    dy = cv2.GaussianBlur((np.random.rand(h, w) * 2 - 1), (0, 0), sigma) * alpha
 
     x, y = np.meshgrid(np.arange(w), np.arange(h))
-    map_x = (x + dx[..., 0]).astype(np.float32)
-    map_y = (y + dy[..., 0]).astype(np.float32)
+    map_x = (x + dx).astype(np.float32)
+    map_y = (y + dy).astype(np.float32)
 
-    warped = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    if c == 1:
-        warped = warped[..., 0]
+    warped = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
     return warped
 
 
 def _add_noise_and_texture(image: np.ndarray) -> np.ndarray:
-    """Add random noise, line strokes, and thickness variations."""
-    img = image.copy().astype(np.uint8)
-    h, w = img.shape[:2]
+    """Add random noise and simulate pen pressure variations."""
+    # Defensive check: Ensure image is 2D and uint8
+    if image.ndim == 3:
+        img = np.squeeze(image).copy()
+    else:
+        img = image.copy()
+        
+    if img.dtype != np.uint8:
+        img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
 
-    # Random noise
-    noise = np.random.normal(loc=0.0, scale=10.0, size=(h, w)).astype(np.int16)
-    noisy = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+    h, w = img.shape[:2] # This will no longer fail
 
-    # Random thickness variations using dilation/erosion.
+    # 1. Random noise
+    noise = np.random.normal(loc=0.0, scale=8.0, size=(h, w)).astype(np.int16)
+    img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+    # 2. Thickness variation (Dilate/Erode)
     ksize = random.choice([1, 2, 3])
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
     if random.random() < 0.5:
-        noisy = cv2.dilate(noisy, kernel, iterations=1)
+        img = cv2.dilate(img, kernel, iterations=1)
     else:
-        noisy = cv2.erode(noisy, kernel, iterations=1)
+        img = cv2.erode(img, kernel, iterations=1)
 
-    # Random strokes / scribbles.
-    num_lines = random.randint(3, 10)
-    for _ in range(num_lines):
-        x1, y1 = random.randint(0, w - 1), random.randint(0, h - 1)
-        x2, y2 = random.randint(0, w - 1), random.randint(0, h - 1)
-        color = random.randint(150, 255)
-        thickness = random.randint(1, 2)
-        cv2.line(noisy, (x1, y1), (x2, y2), int(color), thickness=thickness)
+    # 3. Simulated stray strokes
+    if random.random() < 0.3:
+        for _ in range(random.randint(1, 4)):
+            x1, y1 = random.randint(0, w-1), random.randint(0, h-1)
+            x2, y2 = random.randint(0, w-1), random.randint(0, h-1)
+            cv2.line(img, (x1, y1), (x2, y2), random.randint(200, 255), 1)
 
-    return noisy
+    return img
 
 
 def create_synthetic_dataset(num_samples: int = 1000) -> Tuple[Path, Path]:
     """
-    Create a synthetic paired dataset using the LaTeX renderer and heuristic augmentations.
-
-    Returns
-    -------
-    printed_dir, handwritten_dir
-        Directories containing paired PNG images.
+    Create a synthetic paired dataset.
     """
     project_root = Path(__file__).resolve().parents[2]
     data_root = project_root / "data"
     printed_dir = data_root / "printed"
     handwritten_dir = data_root / "handwritten"
+    
     printed_dir.mkdir(parents=True, exist_ok=True)
     handwritten_dir.mkdir(parents=True, exist_ok=True)
 
-    renderer = LatexRenderer(output_dir=project_root / "outputs" / "synthetic_printed")
+    renderer = LatexRenderer()
+
+    print(f"🎨 Generating {num_samples} synthetic pairs...")
 
     for idx in range(num_samples):
         eq = _random_equation()
         base_name = f"eq_{idx:05d}.png"
 
         try:
+            # renderer.render_latex_to_image returns [0, 1] float32 array
             img_arr = renderer.render_latex_to_image(eq)
-        except Exception:
-            # Skip invalid renderings.
+            
+            # Printed version
+            printed_img = (img_arr * 255.0).astype(np.uint8)
+            
+            # Handwritten version: rotation -> deformation -> noise
+            angle = random.uniform(-3.0, 3.0)
+            h, w = printed_img.shape
+            rot_mat = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+            rotated = cv2.warpAffine(printed_img, rot_mat, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+
+            deformed = _elastic_deform(rotated)
+            handwritten_img = _add_noise_and_texture(deformed)
+
+            # Save pairs
+            cv2.imwrite(str(printed_dir / base_name), printed_img)
+            cv2.imwrite(str(handwritten_dir / base_name), handwritten_img)
+
+            if idx % 100 == 0:
+                print(f"   Processed {idx}/{num_samples}...")
+
+        except Exception as e:
+            print(f"   Error rendering {eq}: {e}")
             continue
 
-        # Convert to uint8 grayscale [0,255].
-        base_img = (img_arr * 255.0).astype(np.uint8)
-
-        # Printed version: slight blur only.
-        printed = cv2.GaussianBlur(base_img, (3, 3), 0)
-
-        # Handwritten-like version: rotation, elastic, noise/texture.
-        angle = random.uniform(-5.0, 5.0)
-        h, w = base_img.shape
-        center = (w // 2, h // 2)
-        rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(base_img, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-
-        deformed = _elastic_deform(rotated)
-        handwritten = _add_noise_and_texture(deformed)
-
-        cv2.imwrite(str(printed_dir / base_name), printed)
-        cv2.imwrite(str(handwritten_dir / base_name), handwritten)
-
+    print("✅ Dataset generation complete.")
     return printed_dir, handwritten_dir
 
 
@@ -203,11 +200,6 @@ def get_dataloaders(
     train_split: float = 0.8,
     num_workers: int = 4,
 ) -> Tuple[DataLoader, DataLoader]:
-    """
-    Construct training and validation DataLoaders for paired equation images.
-
-    Assumes that `data/printed` and `data/handwritten` contain paired PNG files.
-    """
     project_root = Path(__file__).resolve().parents[2]
     printed_dir = project_root / "data" / "printed"
     handwritten_dir = project_root / "data" / "handwritten"
@@ -234,4 +226,3 @@ def get_dataloaders(
         pin_memory=True,
     )
     return train_loader, val_loader
-
