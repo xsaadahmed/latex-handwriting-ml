@@ -46,40 +46,42 @@ class LatexRenderer:
         target_h, target_w = output_size or self.image_size
 
         try:
-            # Wrap in $$ if not present
             math_expr = f"${latex_string}$" if not latex_string.startswith("$") else latex_string
 
-            # Use *args to catch any extra values Matplotlib might return
             parsed_results = self._parser.parse(
                 math_expr,
                 dpi=self.dpi,
                 prop=matplotlib.font_manager.FontProperties(size=self.font_size),
             )
 
-            # Extract the first three (width, height, depth)
             width, height, depth = parsed_results[:3]
 
-            # Create a figure to draw the parsed math
-            fig = matplotlib.figure.Figure(figsize=(width / self.dpi, height / self.dpi), dpi=self.dpi)
+            # SAFETY CHECK: If height is 0, provide a tiny epsilon to avoid ZeroDivisionError
+            safe_height = max(height, 1e-6)
+            y_pos = depth / safe_height
+
+            fig = matplotlib.figure.Figure(
+                figsize=(max(width, 1) / self.dpi, safe_height / self.dpi),
+                dpi=self.dpi,
+            )
             fig.patch.set_alpha(0)
             ax = fig.add_axes([0, 0, 1, 1])
             ax.set_axis_off()
 
-            # Draw the math text
+            # Use the safe position
             ax.text(
                 0,
-                depth / height,
+                y_pos,
                 math_expr,
                 fontproperties=matplotlib.font_manager.FontProperties(size=self.font_size),
             )
 
-            # Convert figure to RGBA array
             canvas = matplotlib.backends.backend_agg.FigureCanvasAgg(fig)
             canvas.draw()
             rgba = np.asarray(canvas.buffer_rgba())
 
-        except Exception:
-            raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}")
+        except Exception as exc:
+            raise LatexRenderingError(f"Failed to render LaTeX: {latex_string!r}") from exc
 
         # --- Remaining logic (Compositing, Grayscale, Resize) remains the same ---
         rgba = rgba.astype(np.float32) / 255.0
