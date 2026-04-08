@@ -152,10 +152,8 @@ def create_synthetic_dataset(num_samples: int = 1000) -> Tuple[Path, Path]:
 
     # Clean old failed attempts to avoid name mismatches
     import shutil
-    if printed_dir.exists():
-        shutil.rmtree(printed_dir)
-    if handwritten_dir.exists():
-        shutil.rmtree(handwritten_dir)
+    if printed_dir.exists(): shutil.rmtree(printed_dir)
+    if handwritten_dir.exists(): shutil.rmtree(handwritten_dir)
 
     printed_dir.mkdir(parents=True, exist_ok=True)
     handwritten_dir.mkdir(parents=True, exist_ok=True)
@@ -182,13 +180,7 @@ def create_synthetic_dataset(num_samples: int = 1000) -> Tuple[Path, Path]:
             angle = random.uniform(-3.0, 3.0)
             h, w = printed_img.shape
             rot_mat = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-            rotated = cv2.warpAffine(
-                printed_img,
-                rot_mat,
-                (w, h),
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=255,
-            )
+            rotated = cv2.warpAffine(printed_img, rot_mat, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=255)
 
             deformed = _elastic_deform(rotated)
             handwritten_img = _add_noise_and_texture(deformed)
@@ -200,7 +192,7 @@ def create_synthetic_dataset(num_samples: int = 1000) -> Tuple[Path, Path]:
             if idx % 100 == 0:
                 print(f"   Stored pair: {base_name}")
 
-        except Exception:
+        except Exception as e:
             continue
 
     return printed_dir, handwritten_dir
